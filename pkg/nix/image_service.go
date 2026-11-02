@@ -3,6 +3,7 @@ package nix
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -113,10 +114,7 @@ func (is *imageService) PullImage(ctx context.Context, req *runtime.PullImageReq
 		resp, err := client.PullImage(ctx, req)
 		return resp, err
 	}
-	archivePath := strings.TrimSuffix(
-		strings.TrimPrefix(ref, nix2container.ImageRefPrefix),
-		":latest",
-	)
+	archivePath, digest := parseNixRef(ref)
 
 	_, err := os.Stat(archivePath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -141,11 +139,31 @@ func (is *imageService) PullImage(ctx context.Context, req *runtime.PullImageReq
 		return nil, err
 	}
 	imageRef := configDesc.Digest.String()
+	if digest != "" && digest != imageRef && digest != img.Target().Digest.String() {
+		return nil, fmt.Errorf("nix image %s has digest %s (manifest %s), not %s",
+			archivePath, imageRef, img.Target().Digest, digest)
+	}
 
 	log.G(ctx).WithField("imageRef", imageRef).Info("[image-service] Successfully pulled image")
 	return &runtime.PullImageResponse{
 		ImageRef: imageRef,
 	}, nil
+}
+
+// parseNixRef splits a "nix:0/nix/store/...tar" ref into the archive's path
+// and the digest after an "@", if any. A tag (":latest", which the kubelet
+// adds to a bare ref, or any other a chart appends) is ignored: the store
+// path is the image's identity, as a digest is when a ref has both. A store
+// path's name can't hold ':' or '@', so neither is ambiguous.
+func parseNixRef(ref string) (archivePath, digest string) {
+	archivePath = strings.TrimPrefix(ref, nix2container.ImageRefPrefix)
+	if i := strings.Index(archivePath, "@"); i >= 0 {
+		archivePath, digest = archivePath[:i], archivePath[i+1:]
+	}
+	if i := strings.LastIndex(archivePath, ":"); i > strings.LastIndex(archivePath, "/") {
+		archivePath = archivePath[:i]
+	}
+	return archivePath, digest
 }
 
 // RemoveImage removes the image.
